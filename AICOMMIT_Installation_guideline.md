@@ -47,18 +47,31 @@ The prompt contains the rules from `.git-commit-rules`, the current branch name 
 ```bash
 git add -p            # only staged changes are used
 aicommit              # print the generated message
-aicommit -c           # generate, open editor to review, then commit
+aicommit -c           # generate, ask for confirmation, then commit
 aicommit -H "JIRA-123, fixes login redirect"   # extra context for the model
 ```
 
 The current branch name (e.g. `feature/JIRA-123-login`) is sent to the model automatically,
 so rules such as "prefix the subject with the ticket id from the branch name" work.
 
+## Confirmation
+
+With `-c` the tool never commits on its own. It shows the generated message and asks:
+
+```
+Use this commit message? [y]es / [e]dit / [r]egenerate / [n]o:
+```
+
+- `y` – commit with the message as shown
+- `e` – open your editor to tweak the message, then commit
+- `r` – ask the LLM for a new message
+- `n` (or no input / EOF) – abort, nothing is committed
+
 ## Options
 
 | Option | Description |
 | --- | --- |
-| `-c` | Commit with the generated message (editor opens to confirm) |
+| `-c` | Commit with the generated message, always after asking for confirmation |
 | `-r` | Path to a rules file |
 | `-m` | Model name (overrides `AICOMMIT_MODEL`) |
 | `--base-url` | API base URL (overrides `AICOMMIT_BASE_URL`) |

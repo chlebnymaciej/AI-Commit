@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -128,7 +129,7 @@ func chat(baseURL, apiKey, model, system, user string) string {
 }
 
 func main() {
-	commit := flag.Bool("c", false, "commit with the generated message (opens editor to confirm)")
+	commit := flag.Bool("c", false, "commit with the generated message (always asks for confirmation first)")
 	rulesPath := flag.String("r", "", "path to rules file (default: <repo root>/.git-commit-rules)")
 	model := flag.String("m", "", "model name")
 	baseURL := flag.String("base-url", "", "API base URL")
@@ -160,19 +161,48 @@ func main() {
 		user = "Extra context from the author: " + *hint + "\n\n" + user
 	}
 
-	msg := chat(
-		firstNonEmpty(*baseURL, env("AICOMMIT_BASE_URL", "OPENAI_BASE_URL"), "https://api.openai.com/v1"),
-		firstNonEmpty(*apiKey, env("AICOMMIT_API_KEY", "OPENAI_API_KEY")),
-		firstNonEmpty(*model, env("AICOMMIT_MODEL"), "gpt-4o-mini"),
-		fmt.Sprintf(systemPrompt, rules),
-		user,
-	)
+	generate := func() string {
+		return chat(
+			firstNonEmpty(*baseURL, env("AICOMMIT_BASE_URL", "OPENAI_BASE_URL"), "https://api.openai.com/v1"),
+			firstNonEmpty(*apiKey, env("AICOMMIT_API_KEY", "OPENAI_API_KEY")),
+			firstNonEmpty(*model, env("AICOMMIT_MODEL"), "gpt-4o-mini"),
+			fmt.Sprintf(systemPrompt, rules),
+			user,
+		)
+	}
 
+	msg := generate()
 	if !*commit {
 		fmt.Println(msg)
 		return
 	}
-	cmd := exec.Command("git", "commit", "-e", "-m", msg)
+
+	// Never commit without explicit confirmation from the user.
+	in := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("\n%s\n\nUse this commit message? [y]es / [e]dit / [r]egenerate / [n]o: ", msg)
+		answer, err := in.ReadString('\n')
+		if err != nil { // no input available (EOF / non-interactive): abort safely
+			fatal("\nNo confirmation received, aborting without committing.")
+		}
+		switch strings.ToLower(strings.TrimSpace(answer)) {
+		case "y", "yes":
+			runCommit("-m", msg)
+			return
+		case "e", "edit":
+			runCommit("-e", "-m", msg)
+			return
+		case "r", "regenerate":
+			msg = generate()
+		case "n", "no":
+			fmt.Println("Aborted, nothing committed.")
+			return
+		}
+	}
+}
+
+func runCommit(args ...string) {
+	cmd := exec.Command("git", append([]string{"commit"}, args...)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		os.Exit(1)
