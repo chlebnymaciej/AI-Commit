@@ -1,0 +1,4 @@
+- Use Conventional Commits: type(scope): subject (feat, fix, docs, refactor, test, chore, perf, build, ci).
+- Subject line max 72 characters, imperative mood, lowercase, no trailing period.
+- Add a body only when the change is non-trivial; explain WHY, not what. Wrap at 80 columns.
+- Do not mention file names unless essential.
