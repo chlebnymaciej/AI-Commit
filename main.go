@@ -29,9 +29,60 @@ Follow these project rules strictly:
 Output ONLY the commit message text. No code fences, no preamble, no explanation.`
 )
 
+// Progress and errors go to stderr so stdout only ever carries the message.
+func info(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "› "+format+"\n", a...)
+}
+
 func fatal(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", a...)
+	fmt.Fprintf(os.Stderr, "✗ Error: "+format+"\n", a...)
 	os.Exit(1)
+}
+
+func isTerminal(f *os.File) bool {
+	st, err := f.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
+}
+
+// spinner shows an in-progress indicator on stderr until the returned func is called.
+func spinner(msg string) (stop func()) {
+	if !isTerminal(os.Stderr) {
+		info("%s", msg)
+		return func() {}
+	}
+	done, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		t := time.NewTicker(100 * time.Millisecond)
+		defer t.Stop()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				fmt.Fprint(os.Stderr, "\r\033[K")
+				return
+			case <-t.C:
+				fmt.Fprintf(os.Stderr, "\r%s %s", frames[i%len(frames)], msg)
+			}
+		}
+	}()
+	return func() { close(done); <-finished }
+}
+
+// apiHint turns an HTTP status into an actionable suggestion.
+func apiHint(status int) string {
+	switch status {
+	case 401, 403:
+		return "check AICOMMIT_API_KEY (or --api-key)"
+	case 404:
+		return "check AICOMMIT_BASE_URL and AICOMMIT_MODEL (model may not exist at this endpoint)"
+	case 429:
+		return "rate limit or quota exceeded, try again later"
+	}
+	if status >= 500 {
+		return "the API server had a problem, try again later"
+	}
+	return ""
 }
 
 func git(args ...string) (string, error) {
@@ -80,13 +131,15 @@ func loadRules(path, repoRoot string) string {
 		if explicit {
 			fatal("Cannot read rules file: %v", err)
 		}
-		fmt.Fprintf(os.Stderr, "warning: %s not found, using default rules\n", path)
+		fmt.Fprintf(os.Stderr, "! %s not found, using default rules\n", path)
 		return defaultRules
 	}
+	info("Loaded rules from %s", path)
 	return strings.TrimSpace(string(data))
 }
 
 func chat(baseURL, apiKey, model, system, user string) string {
+	stop := spinner(fmt.Sprintf("Generating commit message with %s...", model))
 	body, _ := json.Marshal(map[string]any{
 		"model":       model,
 		"temperature": 0.2,
@@ -102,12 +155,29 @@ func chat(baseURL, apiKey, model, system, user string) string {
 	}
 	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
 	if err != nil {
-		fatal("Cannot reach %s: %v", baseURL, err)
+		stop()
+		fatal("Cannot reach %s: %v\n  Hint: check AICOMMIT_BASE_URL and your network connection", baseURL, err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
+	stop()
+	if err != nil {
+		fatal("Failed reading API response: %v", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		fatal("API error %d: %s", resp.StatusCode, raw)
+		msg := strings.TrimSpace(string(raw))
+		var apiErr struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(raw, &apiErr) == nil && apiErr.Error.Message != "" {
+			msg = apiErr.Error.Message
+		}
+		if h := apiHint(resp.StatusCode); h != "" {
+			msg += "\n  Hint: " + h
+		}
+		fatal("API returned HTTP %d: %s", resp.StatusCode, msg)
 	}
 	var out struct {
 		Choices []struct {
@@ -125,7 +195,12 @@ func chat(baseURL, apiKey, model, system, user string) string {
 			lines = append(lines, l)
 		}
 	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
+	msg := strings.TrimSpace(strings.Join(lines, "\n"))
+	if msg == "" {
+		fatal("The model returned an empty commit message (try again or use another model)")
+	}
+	info("Done")
+	return msg
 }
 
 func main() {
@@ -148,7 +223,10 @@ func main() {
 	if strings.TrimSpace(diff) == "" {
 		fatal("Nothing to commit: no staged changes (stage with `git add`).")
 	}
+	files := strings.Fields(mustGit("diff", "--cached", "--name-only"))
+	info("Found %d staged file(s)", len(files))
 	if len(diff) > maxDiffChars {
+		info("Diff is large (%d chars), truncating to %d", len(diff), maxDiffChars)
 		diff = diff[:maxDiffChars] + "\n[... diff truncated ...]"
 	}
 
@@ -183,7 +261,8 @@ func main() {
 		fmt.Printf("\n%s\n\nUse this commit message? [y]es / [e]dit / [r]egenerate / [n]o: ", msg)
 		answer, err := in.ReadString('\n')
 		if err != nil { // no input available (EOF / non-interactive): abort safely
-			fatal("\nNo confirmation received, aborting without committing.")
+			fmt.Fprintln(os.Stderr)
+			fatal("No confirmation received, aborting without committing.")
 		}
 		switch strings.ToLower(strings.TrimSpace(answer)) {
 		case "y", "yes":
@@ -204,7 +283,9 @@ func main() {
 func runCommit(args ...string) {
 	cmd := exec.Command("git", append([]string{"commit"}, args...)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	info("Committing...")
 	if err := cmd.Run(); err != nil {
-		os.Exit(1)
+		fatal("git commit failed: %v", err)
 	}
+	info("Committed successfully")
 }
