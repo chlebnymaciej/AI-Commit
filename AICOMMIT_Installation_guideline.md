@@ -81,5 +81,5 @@ Use this commit message? [y]es / [e]dit / [r]egenerate / [n]o:
 ## Notes
 
 - Nothing staged → the tool exits with an error; unstaged changes are never read.
-- Diffs larger than 60,000 characters are truncated before being sent.
+- Diffs larger than 60,000 characters are truncated before being sent. Change the limit with `--max-diff N` or `AICOMMIT_MAX_DIFF_CHARS`.
 - The staged diff is sent to the configured API endpoint; use a local model for sensitive code.

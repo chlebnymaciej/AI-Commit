@@ -12,14 +12,15 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	defaultRules = "Use Conventional Commits. Subject line <= 72 chars, imperative mood. Optional body explaining why."
-	maxDiffChars = 60000
-	systemPrompt = `You write git commit messages.
+	defaultRules        = "Use Conventional Commits. Subject line <= 72 chars, imperative mood. Optional body explaining why."
+	defaultMaxDiffChars = 60000
+	systemPrompt        = `You write git commit messages.
 Follow these project rules strictly:
 
 <rules>
@@ -121,6 +122,21 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// resolveMaxDiff picks the diff size limit: flag, then env var, then default.
+func resolveMaxDiff(flagVal int) int {
+	if flagVal > 0 {
+		return flagVal
+	}
+	if v := env("AICOMMIT_MAX_DIFF_CHARS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			fatal("AICOMMIT_MAX_DIFF_CHARS must be a positive integer, got %q", v)
+		}
+		return n
+	}
+	return defaultMaxDiffChars
+}
+
 func loadRules(path, repoRoot string) string {
 	explicit := path != ""
 	if !explicit {
@@ -209,9 +225,10 @@ func main() {
 	model := flag.String("m", "", "model name")
 	baseURL := flag.String("base-url", "", "API base URL")
 	apiKey := flag.String("api-key", "", "API key")
+	maxDiff := flag.Int("max-diff", 0, "max diff characters sent to the LLM (default: AICOMMIT_MAX_DIFF_CHARS or 60000)")
 	hint := flag.String("H", "", "extra context for the LLM (e.g. ticket id, intent)")
 	flag.Usage = func() {
-		fmt.Fprint(os.Stderr, "Usage: aicommit [options]\n\nEnv: AICOMMIT_BASE_URL, AICOMMIT_API_KEY, AICOMMIT_MODEL (fallback: OPENAI_BASE_URL, OPENAI_API_KEY)\n\n")
+		fmt.Fprint(os.Stderr, "Usage: aicommit [options]\n\nEnv: AICOMMIT_BASE_URL, AICOMMIT_API_KEY, AICOMMIT_MODEL, AICOMMIT_MAX_DIFF_CHARS (fallback: OPENAI_BASE_URL, OPENAI_API_KEY)\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -225,9 +242,10 @@ func main() {
 	}
 	files := strings.Fields(mustGit("diff", "--cached", "--name-only"))
 	info("Found %d staged file(s)", len(files))
-	if len(diff) > maxDiffChars {
-		info("Diff is large (%d chars), truncating to %d", len(diff), maxDiffChars)
-		diff = diff[:maxDiffChars] + "\n[... diff truncated ...]"
+	limit := resolveMaxDiff(*maxDiff)
+	if len(diff) > limit {
+		info("Diff is large (%d chars), truncating to %d", len(diff), limit)
+		diff = diff[:limit] + "\n[... diff truncated ...]"
 	}
 
 	branch := "(detached HEAD)"
